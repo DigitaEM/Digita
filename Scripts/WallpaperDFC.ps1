@@ -1,31 +1,44 @@
 <#
 .SYNOPSIS
-    Establece un fondo de pantalla corporativo para TODOS los usuarios de un equipo
-    con Windows 10 / 11, usando Rellenar (Fill) como ajuste.
+    Fondo de pantalla corporativo para Windows 10 / 11 con ajuste Rellenar (Fill).
+    Version 2: usa una tarea programada que aplica el fondo cuando el usuario inicia sesion.
 
 .DESCRIPTION
     1. Valida que exista C:\WallpaperFaronics (si no existe, la crea).
     2. Descarga la imagen desde GitHub (URL raw) conservando el nombre Wallpaper_DFC.png.
-    3. Configura el fondo mediante la directiva de equipo (HKLM), de modo que aplica a
-       cualquier usuario que inicie sesion (existente o futuro) con ajuste Rellenar.
+    3. Crea la tarea programada "Faronics-Wallpaper". Cada vez que un usuario inicia sesion,
+       la tarea corre CON ESE USUARIO y aplica el fondo (Rellenar) con la API de Windows.
+         - $TargetUser vacio  -> aplica a TODOS los usuarios (no requiere conocer sus nombres).
+         - $TargetUser = 'Macsupport' -> aplica solo a ese usuario.
+    4. Elimina los valores de directiva HKLM que dejo la version 1 (si apuntan a esta imagen).
 
-    IMPORTANTE (Deep Freeze): si C: esta Frozen, los cambios se pierden al reiniciar.
-    Ejecutar con el equipo en estado Thawed (por ejemplo, mediante una tarea de
-    estacion de trabajo "Batch File" de Deep Freeze, que descongela y vuelve a congelar).
+    NOTA Deep Freeze: si C: esta Frozen, los cambios se pierden al reiniciar. Ejecutar en Thawed.
+
+.PARAMETER TargetUser
+    Usuario especifico (por ejemplo: Macsupport). Vacio = todos los usuarios.
 
 .PARAMETER Remove
-    Revierte la configuracion: elimina la directiva de fondo (no borra la imagen).
+    Deshace todo: elimina la tarea programada, el script de aplicacion y la directiva antigua.
+    No borra la imagen.
 
 .NOTES
-    Codigos de salida: 0 = correcto | 1 = sin imagen disponible | 3 = error de registro
-    Archivo guardado intencionalmente sin acentos para evitar problemas de codificacion
-    en Windows PowerShell 5.1.
+    Codigos de salida: 0 = correcto | 1 = sin imagen / carpeta | 4 = error al crear la tarea
+    Log de este script (SYSTEM): C:\WallpaperFaronics\Wallpaper.log
+    Log por usuario (al iniciar sesion): %TEMP%\WallpaperFaronics.log
+    Archivo guardado sin acentos a proposito, para evitar problemas de codificacion.
 #>
 [CmdletBinding()]
 param(
     [string]$ImageUrl       = 'https://raw.githubusercontent.com/DigitaEM/Digita/main/Wallpaper/Wallpaper_DFC.png',
     [string]$Folder         = 'C:\WallpaperFaronics',
     [string]$FileName       = 'Wallpaper_DFC.png',
+
+    # --- APARTADO DE USUARIO -------------------------------------------------
+    # Dejar vacio ('') para aplicar a TODOS los usuarios.
+    # Para un usuario especifico, escribir su nombre, por ejemplo: 'Macsupport'
+    [string]$TargetUser     = '',
+    # -------------------------------------------------------------------------
+
     [string]$ExpectedSha256 = '',     # Opcional: hash SHA256 esperado de la imagen
     [switch]$Remove
 )
@@ -33,10 +46,12 @@ param(
 $ErrorActionPreference = 'Stop'
 $ProgressPreference    = 'SilentlyContinue'
 
-$ImagePath = Join-Path $Folder $FileName
-$TempPath  = "$ImagePath.download"
-$LogFile   = Join-Path $Folder 'Wallpaper.log'
-$PolicyKey = 'SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
+$ImagePath   = Join-Path $Folder $FileName
+$TempPath    = "$ImagePath.download"
+$LogFile     = Join-Path $Folder 'Wallpaper.log'
+$ApplyScript = Join-Path $Folder 'Apply-Wallpaper.ps1'
+$TaskName    = 'Faronics-Wallpaper'
+$PolicyKey   = 'SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
 
 function Write-Log {
     param([string]$Message, [string]$Level = 'INFO')
@@ -47,14 +62,6 @@ function Write-Log {
             Add-Content -LiteralPath $LogFile -Value $line
         }
     } catch { }
-}
-
-# Abre la clave de directivas en la vista de 64 bits (aunque PowerShell corra en 32 bits)
-function Open-PolicyKey {
-    $view = [Microsoft.Win32.RegistryView]::Default
-    if ([Environment]::Is64BitOperatingSystem) { $view = [Microsoft.Win32.RegistryView]::Registry64 }
-    $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, $view)
-    return $base.CreateSubKey($PolicyKey)
 }
 
 # Verifica la firma PNG (evita guardar una pagina HTML de error como si fuera la imagen)
@@ -69,19 +76,37 @@ function Test-Png {
             -and $b[4] -eq 0x0D -and $b[5] -eq 0x0A -and $b[6] -eq 0x1A -and $b[7] -eq 0x0A)
 }
 
+# Limpieza de la directiva HKLM de la version 1 (solo si apunta a nuestra imagen)
+function Remove-LegacyPolicy {
+    try {
+        $view = [Microsoft.Win32.RegistryView]::Default
+        if ([Environment]::Is64BitOperatingSystem) { $view = [Microsoft.Win32.RegistryView]::Registry64 }
+        $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, $view)
+        $key  = $base.OpenSubKey($PolicyKey, $true)
+        if ($null -eq $key) { return }
+        try {
+            if ([string]$key.GetValue('Wallpaper') -eq $ImagePath) {
+                $key.DeleteValue('Wallpaper', $false)
+                $key.DeleteValue('WallpaperStyle', $false)
+                Write-Log 'Directiva HKLM de la version 1 eliminada.'
+            }
+        } finally { $key.Close() }
+    } catch {
+        Write-Log "No se pudo limpiar la directiva antigua (se continua): $($_.Exception.Message)" 'WARN'
+    }
+}
+
 # ---------------------------------------------------------------- Modo reversa
 if ($Remove) {
     try {
-        $key = Open-PolicyKey
-        try {
-            $key.DeleteValue('Wallpaper', $false)
-            $key.DeleteValue('WallpaperStyle', $false)
-        } finally { $key.Close() }
-        Write-Log 'Directiva de fondo de pantalla eliminada. Aplica en el proximo inicio de sesion.'
+        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $ApplyScript) { Remove-Item -LiteralPath $ApplyScript -Force }
+        Remove-LegacyPolicy
+        Write-Log 'Tarea programada y archivos de aplicacion eliminados.'
         exit 0
     } catch {
-        Write-Log "No se pudo eliminar la directiva: $($_.Exception.Message)" 'ERROR'
-        exit 3
+        Write-Log "Error al revertir: $($_.Exception.Message)" 'ERROR'
+        exit 4
     }
 }
 
@@ -94,7 +119,7 @@ try {
         Write-Log "La carpeta ya existe: $Folder"
     }
 
-    # Permisos: SYSTEM y Administradores control total; Usuarios solo lectura.
+    # Permisos: SYSTEM y Administradores control total; Usuarios solo lectura y ejecucion.
     # Se usan SID conocidos para que funcione en Windows en cualquier idioma.
     & icacls.exe $Folder /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' | Out-Null
     if ($LASTEXITCODE -ne 0) { Write-Log "icacls devolvio el codigo $LASTEXITCODE (se continua)." 'WARN' }
@@ -137,18 +162,73 @@ if (-not $downloaded) {
     }
 }
 
-# ------------------------------------- 3) Fondo para todos los usuarios (Rellenar)
-# WallpaperStyle: 0 Centrar | 2 Estirar | 6 Ajustar | 10 Rellenar | 22 Span
+# --------------------- 3) Script de aplicacion (corre con el usuario al iniciar sesion)
+$applyContent = @'
+$ErrorActionPreference = 'Stop'
+$Image = '@@IMAGE@@'
+$Log   = Join-Path $env:TEMP 'WallpaperFaronics.log'
+function Log([string]$m) {
+    try { Add-Content -LiteralPath $Log -Value ('{0} {1}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $m) } catch { }
+}
 try {
-    $key = Open-PolicyKey
-    try {
-        $key.SetValue('Wallpaper',      $ImagePath, [Microsoft.Win32.RegistryValueKind]::String)
-        $key.SetValue('WallpaperStyle', '10',       [Microsoft.Win32.RegistryValueKind]::String)
-    } finally { $key.Close() }
-    Write-Log "Directiva aplicada: Wallpaper=$ImagePath, WallpaperStyle=10 (Rellenar)."
-    Write-Log 'El fondo se vera en el proximo inicio de sesion de cada usuario.'
+    if (-not (Test-Path -LiteralPath $Image)) { Log "No existe la imagen: $Image"; exit 1 }
+
+    # Rellenar (Fill) = WallpaperStyle 10 y TileWallpaper 0
+    $k = 'HKCU:\Control Panel\Desktop'
+    Set-ItemProperty -Path $k -Name 'WallpaperStyle' -Value '10' -Type String
+    Set-ItemProperty -Path $k -Name 'TileWallpaper'  -Value '0'  -Type String
+
+    Add-Type -Namespace Faronics -Name WpApi -MemberDefinition '[DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)] public static extern bool SystemParametersInfo(uint uiAction, uint uiParam, string pvParam, uint fWinIni);'
+
+    # SPI_SETDESKWALLPAPER = 0x14 ; SPIF_UPDATEINIFILE -bor SPIF_SENDCHANGE = 3
+    $ok = [Faronics.WpApi]::SystemParametersInfo(0x14, 0, $Image, 3)
+    if ($ok) { Log "Fondo aplicado (Rellenar): $Image" }
+    else     { Log ("SystemParametersInfo fallo. Error Win32: {0}" -f [Runtime.InteropServices.Marshal]::GetLastWin32Error()) }
+} catch {
+    Log "Error: $($_.Exception.Message)"
+    exit 1
+}
+'@
+
+# ------------------------------------------------ 4) Tarea programada al iniciar sesion
+try {
+    Set-Content -LiteralPath $ApplyScript -Value $applyContent.Replace('@@IMAGE@@', $ImagePath) -Encoding ASCII
+    Write-Log "Script de aplicacion creado: $ApplyScript"
+
+    $action = New-ScheduledTaskAction -Execute 'powershell.exe' `
+        -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$ApplyScript`""
+
+    if ($TargetUser) {
+        $trigger = New-ScheduledTaskTrigger -AtLogOn -User $TargetUser
+        Write-Log "Alcance: solo el usuario '$TargetUser'."
+    } else {
+        $trigger = New-ScheduledTaskTrigger -AtLogOn
+        Write-Log 'Alcance: todos los usuarios.'
+    }
+
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+        -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 5)
+
+    # Grupo Usuarios (SID S-1-5-32-545): la tarea corre con la cuenta que inicia sesion.
+    $registered = $false
+    foreach ($group in @('S-1-5-32-545', 'BUILTIN\Users')) {
+        try {
+            $principal = New-ScheduledTaskPrincipal -GroupId $group -RunLevel Limited
+            Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
+                -Principal $principal -Settings $settings -Force | Out-Null
+            $registered = $true
+            Write-Log "Tarea programada '$TaskName' registrada (grupo: $group)."
+            break
+        } catch {
+            Write-Log "No se pudo registrar con el grupo '$group': $($_.Exception.Message)" 'WARN'
+        }
+    }
+    if (-not $registered) { throw 'No fue posible registrar la tarea programada.' }
+
+    Remove-LegacyPolicy
+    Write-Log 'Listo. El fondo se aplicara en el proximo inicio de sesion de cada usuario.'
     exit 0
 } catch {
-    Write-Log "No se pudo escribir la directiva en el registro: $($_.Exception.Message)" 'ERROR'
-    exit 3
+    Write-Log "Error al crear la tarea programada: $($_.Exception.Message)" 'ERROR'
+    exit 4
 }
