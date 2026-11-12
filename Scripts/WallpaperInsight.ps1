@@ -1,11 +1,11 @@
 <#
 .SYNOPSIS
-    Fondo de pantalla corporativo para Windows 10 / 11 con ajuste Rellenar (Fill).
+    Fondo de pantalla corporativo de Insight para Windows 10 / 11 con ajuste Rellenar (Fill).
 
 .DESCRIPTION
     1. Valida que exista C:\WallpaperFaronics (si no existe, la crea).
-    2. Descarga la imagen desde GitHub (URL raw) conservando el nombre Wallpaper_DFC.png.
-    3. Crea la tarea programada "Faronics-Wallpaper". Cada vez que un usuario inicia sesion,
+    2. Descarga la imagen desde GitHub (URL raw) conservando el nombre Wallpaper_Insight.png.
+    3. Crea la tarea programada "Faronics-Wallpaper-Insight". Cada vez que un usuario inicia sesion,
        la tarea corre CON ESE USUARIO y aplica el fondo (Rellenar).
          - $TargetUser vacio          -> aplica a TODOS los usuarios.
          - $TargetUser = 'Macsupport' -> aplica solo a ese usuario.
@@ -20,16 +20,17 @@
     Elimina la tarea programada y el script de aplicacion. No borra la imagen.
 
 .NOTES
+    Script origen: https://raw.githubusercontent.com/DigitaEM/Digita/refs/heads/main/Scripts/WallpaperInsight.ps1
     Codigos de salida: 0 = correcto | 1 = sin carpeta o sin imagen | 4 = error en la tarea
-    Log de este script: C:\WallpaperFaronics\Wallpaper.log
-    Log por usuario (al iniciar sesion): %TEMP%\WallpaperFaronics.log
+    Log de este script: C:\WallpaperFaronics\WallpaperInsight.log
+    Log por usuario (al iniciar sesion): %TEMP%\WallpaperInsight.log
     Archivo guardado sin acentos a proposito, para evitar problemas de codificacion.
 #>
 [CmdletBinding()]
 param(
-    [string]$ImageUrl   = 'https://raw.githubusercontent.com/DigitaEM/Digita/main/Wallpaper/Wallpaper_Insight.jpeg',
+    [string]$ImageUrl   = 'https://raw.githubusercontent.com/DigitaEM/Digita/refs/heads/main/Wallpaper/Wallpaper_Insight.png',
     [string]$Folder     = 'C:\WallpaperFaronics',
-    [string]$FileName   = 'Wallpaper_Insight.jpeg',
+    [string]$FileName   = 'Wallpaper_Insight.png',
 
     # --- APARTADO DE USUARIO -------------------------------------------------
     # Dejar vacio ('') para aplicar a TODOS los usuarios.
@@ -45,9 +46,9 @@ $ProgressPreference    = 'SilentlyContinue'
 
 $ImagePath   = Join-Path $Folder $FileName
 $TempPath    = "$ImagePath.download"
-$LogFile     = Join-Path $Folder 'Wallpaper.log'
-$ApplyScript = Join-Path $Folder 'Apply-Wallpaper.ps1'
-$TaskName    = 'Faronics-Wallpaper'
+$LogFile     = Join-Path $Folder 'WallpaperInsight.log'
+$ApplyScript = Join-Path $Folder 'Apply-WallpaperInsight.ps1'
+$TaskName    = 'Faronics-Wallpaper-Insight'
 
 function Write-Log {
     param([string]$Message, [string]$Level = 'INFO')
@@ -113,7 +114,7 @@ for ($i = 1; $i -le 3 -and -not $downloaded; $i++) {
         Invoke-WebRequest -Uri $ImageUrl -OutFile $TempPath -UseBasicParsing -TimeoutSec 60
 
         if (-not (Test-Png $TempPath)) {
-            throw 'El archivo descargado no es un JPEG valido (verifique que la URL sea la version raw).'
+            throw 'El archivo descargado no es un PNG valido (verifique que la URL sea la version raw).'
         }
         Move-Item -LiteralPath $TempPath -Destination $ImagePath -Force
         $downloaded = $true
@@ -138,7 +139,7 @@ if (-not $downloaded) {
 $applyContent = @'
 $ErrorActionPreference = 'Stop'
 $Image = '@@IMAGE@@'
-$Log   = Join-Path $env:TEMP 'WallpaperFaronics.log'
+$Log   = Join-Path $env:TEMP 'WallpaperInsight.log'
 function Log([string]$m) {
     try { Add-Content -LiteralPath $Log -Value ('{0} {1}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $m) } catch { }
 }
