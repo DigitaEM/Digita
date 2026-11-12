@@ -1,45 +1,42 @@
 <#
 .SYNOPSIS
     Fondo de pantalla corporativo para Windows 10 / 11 con ajuste Rellenar (Fill).
-    Version 2: usa una tarea programada que aplica el fondo cuando el usuario inicia sesion.
 
 .DESCRIPTION
     1. Valida que exista C:\WallpaperFaronics (si no existe, la crea).
     2. Descarga la imagen desde GitHub (URL raw) conservando el nombre Wallpaper_DFC.png.
     3. Crea la tarea programada "Faronics-Wallpaper". Cada vez que un usuario inicia sesion,
-       la tarea corre CON ESE USUARIO y aplica el fondo (Rellenar) con la API de Windows.
-         - $TargetUser vacio  -> aplica a TODOS los usuarios (no requiere conocer sus nombres).
+       la tarea corre CON ESE USUARIO y aplica el fondo (Rellenar).
+         - $TargetUser vacio          -> aplica a TODOS los usuarios.
          - $TargetUser = 'Macsupport' -> aplica solo a ese usuario.
-    4. Elimina los valores de directiva HKLM que dejo la version 1 (si apuntan a esta imagen).
 
-    NOTA Deep Freeze: si C: esta Frozen, los cambios se pierden al reiniciar. Ejecutar en Thawed.
+    Si el equipo tiene Deep Freeze con C: en estado Frozen, los cambios se pierden al
+    reiniciar. En ese caso, ejecutar con el equipo en estado Thawed.
 
 .PARAMETER TargetUser
     Usuario especifico (por ejemplo: Macsupport). Vacio = todos los usuarios.
 
 .PARAMETER Remove
-    Deshace todo: elimina la tarea programada, el script de aplicacion y la directiva antigua.
-    No borra la imagen.
+    Elimina la tarea programada y el script de aplicacion. No borra la imagen.
 
 .NOTES
-    Codigos de salida: 0 = correcto | 1 = sin imagen / carpeta | 4 = error al crear la tarea
-    Log de este script (SYSTEM): C:\WallpaperFaronics\Wallpaper.log
+    Codigos de salida: 0 = correcto | 1 = sin carpeta o sin imagen | 4 = error en la tarea
+    Log de este script: C:\WallpaperFaronics\Wallpaper.log
     Log por usuario (al iniciar sesion): %TEMP%\WallpaperFaronics.log
     Archivo guardado sin acentos a proposito, para evitar problemas de codificacion.
 #>
 [CmdletBinding()]
 param(
-    [string]$ImageUrl       = 'https://raw.githubusercontent.com/DigitaEM/Digita/main/Wallpaper/Wallpaper_DFC.png',
-    [string]$Folder         = 'C:\WallpaperFaronics',
-    [string]$FileName       = 'Wallpaper_DFC.png',
+    [string]$ImageUrl   = 'https://raw.githubusercontent.com/DigitaEM/Digita/main/Wallpaper/Wallpaper_DFC.png',
+    [string]$Folder     = 'C:\WallpaperFaronics',
+    [string]$FileName   = 'Wallpaper_DFC.png',
 
     # --- APARTADO DE USUARIO -------------------------------------------------
     # Dejar vacio ('') para aplicar a TODOS los usuarios.
     # Para un usuario especifico, escribir su nombre, por ejemplo: 'Macsupport'
-    [string]$TargetUser     = '',
+    [string]$TargetUser = '',
     # -------------------------------------------------------------------------
 
-    [string]$ExpectedSha256 = '',     # Opcional: hash SHA256 esperado de la imagen
     [switch]$Remove
 )
 
@@ -51,7 +48,6 @@ $TempPath    = "$ImagePath.download"
 $LogFile     = Join-Path $Folder 'Wallpaper.log'
 $ApplyScript = Join-Path $Folder 'Apply-Wallpaper.ps1'
 $TaskName    = 'Faronics-Wallpaper'
-$PolicyKey   = 'SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
 
 function Write-Log {
     param([string]$Message, [string]$Level = 'INFO')
@@ -76,33 +72,12 @@ function Test-Png {
             -and $b[4] -eq 0x0D -and $b[5] -eq 0x0A -and $b[6] -eq 0x1A -and $b[7] -eq 0x0A)
 }
 
-# Limpieza de la directiva HKLM de la version 1 (solo si apunta a nuestra imagen)
-function Remove-LegacyPolicy {
-    try {
-        $view = [Microsoft.Win32.RegistryView]::Default
-        if ([Environment]::Is64BitOperatingSystem) { $view = [Microsoft.Win32.RegistryView]::Registry64 }
-        $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, $view)
-        $key  = $base.OpenSubKey($PolicyKey, $true)
-        if ($null -eq $key) { return }
-        try {
-            if ([string]$key.GetValue('Wallpaper') -eq $ImagePath) {
-                $key.DeleteValue('Wallpaper', $false)
-                $key.DeleteValue('WallpaperStyle', $false)
-                Write-Log 'Directiva HKLM de la version 1 eliminada.'
-            }
-        } finally { $key.Close() }
-    } catch {
-        Write-Log "No se pudo limpiar la directiva antigua (se continua): $($_.Exception.Message)" 'WARN'
-    }
-}
-
 # ---------------------------------------------------------------- Modo reversa
 if ($Remove) {
     try {
         Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
         if (Test-Path -LiteralPath $ApplyScript) { Remove-Item -LiteralPath $ApplyScript -Force }
-        Remove-LegacyPolicy
-        Write-Log 'Tarea programada y archivos de aplicacion eliminados.'
+        Write-Log 'Tarea programada y script de aplicacion eliminados.'
         exit 0
     } catch {
         Write-Log "Error al revertir: $($_.Exception.Message)" 'ERROR'
@@ -139,9 +114,6 @@ for ($i = 1; $i -le 3 -and -not $downloaded; $i++) {
 
         if (-not (Test-Png $TempPath)) {
             throw 'El archivo descargado no es un PNG valido (verifique que la URL sea la version raw).'
-        }
-        if ($ExpectedSha256 -and ((Get-FileHash -LiteralPath $TempPath -Algorithm SHA256).Hash -ne $ExpectedSha256)) {
-            throw 'El hash SHA256 de la imagen no coincide con el esperado.'
         }
         Move-Item -LiteralPath $TempPath -Destination $ImagePath -Force
         $downloaded = $true
@@ -225,7 +197,6 @@ try {
     }
     if (-not $registered) { throw 'No fue posible registrar la tarea programada.' }
 
-    Remove-LegacyPolicy
     Write-Log 'Listo. El fondo se aplicara en el proximo inicio de sesion de cada usuario.'
     exit 0
 } catch {
